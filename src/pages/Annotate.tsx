@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
@@ -7,9 +7,14 @@ import { Stage, Layer, Image as KonvaImage, Rect, Circle, Line } from 'react-kon
 import useImage from 'use-image';
 import {
   ZoomIn, ZoomOut, Move, Square, Hexagon, CircleDot,
-  Save, ArrowLeft, Sun, Contrast, Trash2, Edit2, Check, X
+  ArrowLeft, Sun, Contrast, Trash2, Edit2, Check, X,
+  Pencil, Eraser, Undo2, Redo2
 } from 'lucide-react';
 import Konva from 'konva';
+import { useAppStore } from '../store/store';
+import { canAnnotateDataset, canManageDataset, createAuditLog, hasAccess } from '../rbac/auth';
+
+
 
 // ─── Annotation Edit Modal ─────────────────────────────────────────────────────
 const LABELS = [
@@ -19,13 +24,35 @@ const LABELS = [
 
 interface EditAnnotationModalProps {
   annotation: Annotation;
-  onSave: (id: string, label: string, remarks: string) => void;
+  onSave: (id: string, label: string, remarks: string, biRads: string) => void;
   onClose: () => void;
 }
 
 const EditAnnotationModal: React.FC<EditAnnotationModalProps> = ({ annotation, onSave, onClose }) => {
   const [label, setLabel] = useState(annotation.label);
   const [remarks, setRemarks] = useState(annotation.remarks);
+  const [biRads, setBiRads] = useState(annotation.biRads || '4');
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
+  const onSaveRef = useRef(onSave);
+
+  useEffect(() => {
+    onSaveRef.current = onSave;
+  }, [onSave]);
+
+  useEffect(() => {
+    setLabel(annotation.label);
+    setRemarks(annotation.remarks);
+    setBiRads(annotation.biRads || '4');
+    setSaveState('idle');
+  }, [annotation.id, annotation.label, annotation.remarks, annotation.biRads]);
+
+  const handleSave = async () => {
+    setSaveState('saving');
+    await onSaveRef.current(annotation.id, label, remarks, biRads);
+    setSaveState('saved');
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
       <div className="bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-sm">
@@ -45,6 +72,22 @@ const EditAnnotationModal: React.FC<EditAnnotationModalProps> = ({ annotation, o
             </select>
           </div>
           <div>
+            <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">BI-RADS</label>
+            <select
+              value={biRads}
+              onChange={e => setBiRads(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500"
+            >
+              <option value="0">BI-RADS 0 – Incomplete</option>
+              <option value="1">BI-RADS 1 – Negative</option>
+              <option value="2">BI-RADS 2 – Benign</option>
+              <option value="3">BI-RADS 3 – Probably Benign</option>
+              <option value="4">BI-RADS 4 – Suspicious</option>
+              <option value="5">BI-RADS 5 – Highly Suggestive of Malignancy</option>
+              <option value="6">BI-RADS 6 – Known Biopsy-Proven Malignancy</option>
+            </select>
+          </div>
+          <div>
             <label className="block text-xs font-medium text-slate-400 mb-1.5 uppercase tracking-wider">Remarks</label>
             <textarea
               value={remarks}
@@ -52,10 +95,19 @@ const EditAnnotationModal: React.FC<EditAnnotationModalProps> = ({ annotation, o
               className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 h-20 resize-none"
             />
           </div>
-          <div className="flex justify-end gap-2 pt-1">
-            <button onClick={onClose} className="px-3 py-1.5 text-slate-400 hover:text-white text-sm rounded-lg transition-colors">Cancel</button>
-            <button onClick={() => { onSave(annotation.id, label, remarks); onClose(); }} className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center gap-1.5">
-              <Check className="w-3.5 h-3.5" /> Save
+          <div className="space-y-2 pt-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className={`text-xs ${saveState === 'saved' ? 'text-green-400' : saveState === 'saving' ? 'text-blue-400' : 'text-slate-500'}`}>
+                {saveState === 'saved' ? 'Saved' : saveState === 'saving' ? 'Saving…' : 'Changes pending'}
+              </span>
+              <button onClick={onClose} className="px-3 py-1.5 text-slate-400 hover:text-white text-sm rounded-lg transition-colors">Cancel</button>
+            </div>
+            <button
+              type="button"
+              onClick={() => void handleSave()}
+              className="w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded-lg transition-colors flex items-center justify-center gap-1.5 font-medium"
+            >
+              <Check className="w-3.5 h-3.5" /> Save Changes
             </button>
           </div>
         </div>
@@ -78,6 +130,9 @@ const Annotate: React.FC = () => {
   const { imageId } = useParams<{ imageId: string }>();
   const navigate = useNavigate();
 
+  const authRole = useAppStore((state) => state.authRole);
+  const organizationId = useAppStore((state) => state.organizationId);
+  const authUser = useAppStore((state) => state.authUser);
   const imageRecord = useLiveQuery(() => db.images.get(imageId || ''), [imageId]);
   const annotations = useLiveQuery(() => db.annotations.where('imageId').equals(imageId || '').toArray(), [imageId]);
 
@@ -90,23 +145,40 @@ const Annotate: React.FC = () => {
   // Canvas state
   const [scale, setScale] = useState(1);
   const [position, setPosition] = useState({ x: 0, y: 0 });
-  const [tool, setTool] = useState<'pan' | 'bbox' | 'polygon' | 'point'>('pan');
+  const [tool, setTool] = useState<'pan' | 'bbox' | 'polygon' | 'point' | 'freehand' | 'erase'>('pan');
   const [brightness, setBrightness] = useState(0);
   const [contrast, setContrast] = useState(0);
+  const [brushSize, setBrushSize] = useState(6);
+  const [brushColor, setBrushColor] = useState('#f59e0b');
+  const [brushOpacity, setBrushOpacity] = useState(0.7);
+  const [activeBiRads, setActiveBiRads] = useState('4');
+  const [undoStack, setUndoStack] = useState<Annotation[]>([]);
+  const [redoStack, setRedoStack] = useState<Annotation[]>([]);
 
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
   const [currentPoints, setCurrentPoints] = useState<number[]>([]);
   const [activeLabel, setActiveLabel] = useState('Malignant');
   const [activeRemarks, setActiveRemarks] = useState('');
+  const activeLabelRef = useRef(activeLabel);
+  const activeRemarksRef = useRef(activeRemarks);
+  const activeBiRadsRef = useRef(activeBiRads);
 
   // Edit state
   const [editingAnnotation, setEditingAnnotation] = useState<Annotation | null>(null);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'unsaved' | 'saving'>('saved');
+  const [draftHydrated, setDraftHydrated] = useState(false);
+  const [hasUnsavedDraft, setHasUnsavedDraft] = useState(false);
+
+  const draftStorageKey = imageId ? `annotate-draft-${imageId}` : null;
+  const shouldPromptForNavigation = saveStatus === 'unsaved' || saveStatus === 'saving' || hasUnsavedDraft;
 
   // Image remarks editing
   const [editingImageRemarks, setEditingImageRemarks] = useState(false);
   const [imageRemarks, setImageRemarks] = useState('');
+
+  // console.log("Route imageId:", imageId);
+  // console.log("Loaded image:", imageRecord?.id);
 
   // ── Responsive canvas sizing ─────────────────────────────────────────────────
   useEffect(() => {
@@ -123,6 +195,22 @@ const Annotate: React.FC = () => {
     if (containerRef.current) ro.observe(containerRef.current);
     return () => ro.disconnect();
   }, []);
+  // //////////////////////////////////////////
+  // useEffect(() => {
+  //   (async () => {
+  //     console.log("Route imageId:", imageId);
+
+  //     const allImages = await db.images.toArray();
+
+  //     console.log("Image count:", allImages.length);
+  //     console.log("Image IDs:", allImages.map(i => i.id));
+
+  //     const img = await db.images.get(imageId!);
+
+  //     console.log("Lookup result:", img);
+  //   })();
+  // }, [imageId]);
+  
 
   // ── Image URL ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -156,6 +244,80 @@ const Annotate: React.FC = () => {
     }
   }, [img, brightness, contrast]);
 
+  useEffect(() => {
+    activeLabelRef.current = activeLabel;
+  }, [activeLabel]);
+
+  useEffect(() => {
+    activeRemarksRef.current = activeRemarks;
+  }, [activeRemarks]);
+
+  useEffect(() => {
+    activeBiRadsRef.current = activeBiRads;
+  }, [activeBiRads]);
+
+  // ── Persist annotation draft per image ─────────────────────────────────────
+  useEffect(() => {
+    setDraftHydrated(false);
+    setHasUnsavedDraft(false);
+    if (!draftStorageKey) return;
+
+    const raw = localStorage.getItem(draftStorageKey);
+    if (!raw) {
+      setDraftHydrated(true);
+      return;
+    }
+
+    try {
+      const saved = JSON.parse(raw) as {
+        activeLabel?: string;
+        activeRemarks?: string;
+        activeBiRads?: string;
+        brushSize?: number;
+        brushColor?: string;
+        brushOpacity?: number;
+        tool?: 'pan' | 'bbox' | 'polygon' | 'point' | 'freehand' | 'erase';
+      };
+
+      if (saved.activeLabel) setActiveLabel(saved.activeLabel);
+      if (typeof saved.activeRemarks === 'string') setActiveRemarks(saved.activeRemarks);
+      if (saved.activeBiRads) setActiveBiRads(saved.activeBiRads);
+      if (typeof saved.brushSize === 'number') setBrushSize(saved.brushSize);
+      if (typeof saved.brushColor === 'string') setBrushColor(saved.brushColor);
+      if (typeof saved.brushOpacity === 'number') setBrushOpacity(saved.brushOpacity);
+      if (saved.tool) setTool(saved.tool);
+    } catch {
+      localStorage.removeItem(draftStorageKey);
+    } finally {
+      setDraftHydrated(true);
+      setHasUnsavedDraft(false);
+    }
+  }, [draftStorageKey]);
+
+  useEffect(() => {
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (!shouldPromptForNavigation) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [shouldPromptForNavigation]);
+
+  useEffect(() => {
+    if (!draftStorageKey || !draftHydrated) return;
+    localStorage.setItem(draftStorageKey, JSON.stringify({
+      activeLabel,
+      activeRemarks,
+      activeBiRads,
+      brushSize,
+      brushColor,
+      brushOpacity,
+      tool,
+    }));
+  }, [draftStorageKey, draftHydrated, activeLabel, activeRemarks, activeBiRads, brushSize, brushColor, brushOpacity, tool]);
+
   // ── Geometry helpers ─────────────────────────────────────────────────────────
   const calculateCenter = (type: string, coords: number[]) => {
     if (type === 'point') return { x: coords[0], y: coords[1] };
@@ -176,40 +338,122 @@ const Annotate: React.FC = () => {
     return Math.abs(area / 2);
   };
 
+  const normalizeFreehandPoints = (points: number[]) => {
+    if (points.length < 4) return points;
+    const normalized: number[] = [points[0], points[1]];
+
+    for (let i = 2; i < points.length; i += 2) {
+      const prevX = normalized[normalized.length - 2];
+      const prevY = normalized[normalized.length - 1];
+      const nextX = points[i];
+      const nextY = points[i + 1];
+      const movedEnough = Math.hypot(nextX - prevX, nextY - prevY) >= 1;
+      if (movedEnough) {
+        normalized.push(nextX, nextY);
+      }
+    }
+
+    return normalized;
+  };
+
   // ── Save annotation ──────────────────────────────────────────────────────────
-  const saveAnnotation = async (type: 'bbox' | 'polygon' | 'point', coords: number[]) => {
-    if (!imageId) return;
+  const saveAnnotation = async (type: Annotation['type'], coords: number[], style?: { strokeColor?: string; strokeWidth?: number; opacity?: number }) => {
+    if (!imageId || !canAnnotateDataset(authRole)) return;
     setSaveStatus('saving');
     const newAnno: Annotation = {
       id: crypto.randomUUID(),
       imageId,
       type,
-      coordinates: coords,
+      coordinates: type === 'freehand' ? normalizeFreehandPoints(coords) : coords,
       tumorCenter: calculateCenter(type, coords),
       tumorArea: calculateArea(type, coords),
-      label: activeLabel,
-      remarks: activeRemarks,
+      label: activeLabelRef.current,
+      remarks: activeRemarksRef.current,
+      biRads: activeBiRadsRef.current,
+      strokeColor: style?.strokeColor ?? brushColor,
+      strokeWidth: style?.strokeWidth ?? brushSize,
+      opacity: style?.opacity ?? brushOpacity,
       timestamp: Date.now(),
+      organizationId: imageRecord?.organizationId || organizationId || 'sample-hospital',
+      createdByUserId: authUser?.id || 'unknown',
     };
     await db.annotations.add(newAnno);
+    if (type === 'freehand') {
+      setUndoStack(prev => [...prev, newAnno]);
+      setRedoStack([]);
+    }
+    await createAuditLog({
+      actorUserId: authUser?.id || 'unknown',
+      actorRole: authRole || 'general',
+      organizationId: imageRecord?.organizationId || organizationId || 'sample-hospital',
+      timestamp: Date.now(),
+      action: 'annotation',
+      targetType: 'annotation',
+      targetId: newAnno.id,
+      details: `Created ${type} annotation`,
+    });
     if (imageRecord && imageRecord.status === 'Not Reviewed') {
       await db.images.update(imageId, { status: 'In Progress' });
     }
+    setHasUnsavedDraft(false);
     setSaveStatus('saved');
   };
+  // console.log({
+  //   activeLabel,
+  //   activeLabelRef: activeLabelRef.current,
 
+  //   activeRemarks,
+  //   activeRemarksRef: activeRemarksRef.current,
+
+  //   activeBiRads,
+  //   activeBiRadsRef: activeBiRadsRef.current,
+  // });
   const deleteAnnotation = async (id: string) => {
+    if (!canAnnotateDataset(authRole)) return;
     await db.annotations.delete(id);
+    setHasUnsavedDraft(true);
     setSaveStatus('unsaved');
   };
 
-  const updateAnnotation = async (id: string, label: string, remarks: string) => {
-    await db.annotations.update(id, { label, remarks });
+  const updateAnnotation = async (id: string, label: string, remarks: string, biRads: string) => {
+    if (!canAnnotateDataset(authRole)) return;
+    await db.annotations.update(id, { label, remarks, biRads });
+    setHasUnsavedDraft(false);
+    setSaveStatus('saved');
+  };
+
+  const undoLastFreehand = async () => {
+    if (!undoStack.length) return;
+    const last = undoStack[undoStack.length - 1];
+    await db.annotations.delete(last.id);
+    setUndoStack(prev => prev.slice(0, -1));
+    setRedoStack(prev => [...prev, last]);
+    setHasUnsavedDraft(true);
+    setSaveStatus('unsaved');
+  };
+
+  const redoLastFreehand = async () => {
+    if (!redoStack.length) return;
+    const next = redoStack[redoStack.length - 1];
+    await db.annotations.add(next);
+    setRedoStack(prev => prev.slice(0, -1));
+    setUndoStack(prev => [...prev, next]);
+    setHasUnsavedDraft(false);
+    setSaveStatus('saved');
+  };
+
+  const clearFreehandAnnotations = async () => {
+    if (!canAnnotateDataset(authRole)) return;
+    const freehandAnnotations = (annotations || []).filter(annotation => annotation.type === 'freehand');
+    await Promise.all(freehandAnnotations.map(annotation => db.annotations.delete(annotation.id)));
+    setUndoStack([]);
+    setRedoStack([]);
+    setHasUnsavedDraft(true);
     setSaveStatus('unsaved');
   };
 
   const saveImageRemarks = async () => {
-    if (!imageId) return;
+    if (!imageId || !canManageDataset(authRole)) return;
     await db.images.update(imageId, { remarks: imageRemarks });
     setEditingImageRemarks(false);
   };
@@ -229,23 +473,56 @@ const Annotate: React.FC = () => {
 
   const handleMouseDown = (e: any) => {
     if (tool === 'pan') return;
+    if (tool === 'erase') {
+      const target = e.target;
+      const annotationId = target?.attrs?.['data-anno-id'];
+      if (annotationId) {
+        deleteAnnotation(annotationId);
+      }
+      return;
+    }
     const stage = e.target.getStage();
     const pos = stage.getRelativePointerPosition();
     if (tool === 'point') { saveAnnotation('point', [pos.x, pos.y]); return; }
     if (tool === 'bbox') { setIsDrawing(true); setCurrentPoints([pos.x, pos.y, pos.x, pos.y]); }
     if (tool === 'polygon') { setIsDrawing(true); setCurrentPoints(prev => [...prev, pos.x, pos.y]); }
+    if (tool === 'freehand') { setIsDrawing(true); setCurrentPoints([pos.x, pos.y]); }
   };
 
   const handleMouseMove = (e: any) => {
-    if (!isDrawing || tool !== 'bbox') return;
+    if (!isDrawing) return;
     const stage = e.target.getStage();
     const pos = stage.getRelativePointerPosition();
-    setCurrentPoints(prev => { const n = [...prev]; n[2] = pos.x; n[3] = pos.y; return n; });
+    if (tool === 'bbox') {
+      setCurrentPoints(prev => { const n = [...prev]; n[2] = pos.x; n[3] = pos.y; return n; });
+      return;
+    }
+    if (tool === 'freehand') {
+      setCurrentPoints(prev => {
+        if (prev.length === 0) return [pos.x, pos.y];
+        const lastX = prev[prev.length - 2];
+        const lastY = prev[prev.length - 1];
+        if (Math.hypot(pos.x - lastX, pos.y - lastY) < 1) return prev;
+        return [...prev, pos.x, pos.y];
+      });
+    }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = async () => {
     if (!isDrawing || tool === 'pan' || tool === 'polygon') return;
-    if (tool === 'bbox') { setIsDrawing(false); saveAnnotation('bbox', currentPoints); setCurrentPoints([]); }
+    if (tool === 'bbox') {
+      setIsDrawing(false);
+      saveAnnotation('bbox', currentPoints);
+      setCurrentPoints([]);
+      return;
+    }
+    if (tool === 'freehand') {
+      setIsDrawing(false);
+      if (currentPoints.length >= 4) {
+        await saveAnnotation('freehand', currentPoints, { strokeColor: brushColor, strokeWidth: brushSize, opacity: brushOpacity });
+      }
+      setCurrentPoints([]);
+    }
   };
 
   const handleDblClick = () => {
@@ -255,6 +532,17 @@ const Annotate: React.FC = () => {
       setCurrentPoints([]);
     }
   };
+
+  if (!imageRecord || !hasAccess(authRole, organizationId, imageRecord.organizationId)) {
+    return (
+      <div className="flex h-full items-center justify-center text-slate-400">
+        <div className="rounded-xl border border-slate-800 bg-slate-900 px-6 py-4 text-center">
+          <p className="font-medium text-slate-200">Access denied</p>
+          <p className="mt-1 text-sm text-slate-500">This image belongs to a different tenant.</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!imageRecord) {
     return (
@@ -273,7 +561,13 @@ const Annotate: React.FC = () => {
       {/* ── Left Tools Sidebar ── */}
       <div className="w-14 bg-slate-900 border-r border-slate-800 flex flex-col items-center py-3 gap-1 shrink-0">
         <button
-          onClick={() => navigate('/gallery')}
+          onClick={() => {
+            if (shouldPromptForNavigation) {
+              const confirmed = window.confirm('You have unsaved annotation changes. Leave this page?');
+              if (!confirmed) return;
+            }
+            navigate('/gallery');
+          }}
           className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors mb-2"
           title="Back to Gallery"
         >
@@ -281,14 +575,19 @@ const Annotate: React.FC = () => {
         </button>
         <div className="w-8 h-px bg-slate-800 my-1" />
         {([
-          ['pan', Move, 'Pan & Zoom (V)'],
-          ['bbox', Square, 'Bounding Box (B)'],
-          ['polygon', Hexagon, 'Polygon (P) — dbl-click to finish'],
-          ['point', CircleDot, 'Point (K)'],
+          ['pan', Move, 'Pan & Zoom'],
+          ['bbox', Square, 'Bounding Box'],
+          ['polygon', Hexagon, 'Polygon — dbl-click to finish'],
+          ['point', CircleDot, 'Point'],
+          ['freehand', Pencil, 'Freehand Brush'],
+          ['erase', Eraser, 'Erase Freehand Region'],
         ] as const).map(([t, Icon, title]) => (
           <button
             key={t}
-            onClick={() => setTool(t)}
+            onClick={() => {
+              setTool(t);
+              setHasUnsavedDraft(true);
+            }}
             className={`p-2.5 rounded-lg transition-colors ${tool === t ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/40' : 'text-slate-400 hover:text-white hover:bg-slate-800'}`}
             title={title}
           >
@@ -296,6 +595,15 @@ const Annotate: React.FC = () => {
           </button>
         ))}
         <div className="flex-1" />
+        <button onClick={() => void undoLastFreehand()} className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors" title="Undo freehand stroke">
+          <Undo2 className="w-4 h-4" />
+        </button>
+        <button onClick={() => void redoLastFreehand()} className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors" title="Redo freehand stroke">
+          <Redo2 className="w-4 h-4" />
+        </button>
+        <button onClick={() => void clearFreehandAnnotations()} className="p-2.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors" title="Clear freehand annotations">
+          <Trash2 className="w-4 h-4" />
+        </button>
         {/* Save status indicator */}
         <div className={`text-[9px] font-medium px-1 py-0.5 rounded text-center leading-tight ${saveStatus === 'saved' ? 'text-green-400' : saveStatus === 'saving' ? 'text-blue-400' : 'text-amber-400'}`}>
           {saveStatus === 'saved' ? '● Saved' : saveStatus === 'saving' ? '⟳ Saving' : '● Unsaved'}
@@ -343,6 +651,9 @@ const Annotate: React.FC = () => {
                 if (anno.type === 'point') {
                   return <Circle key={anno.id} x={anno.coordinates[0]} y={anno.coordinates[1]} radius={5 / scale} fill={color} opacity={0.9} />;
                 }
+                if (anno.type === 'freehand') {
+                  return <Line key={anno.id} points={anno.coordinates} stroke={anno.strokeColor || color} strokeWidth={(anno.strokeWidth || 6) / scale} opacity={anno.opacity ?? 0.7} lineCap="round" lineJoin="round" tension={0.3} data-anno-id={anno.id} />;
+                }
                 return null;
               })}
 
@@ -359,6 +670,9 @@ const Annotate: React.FC = () => {
               {isDrawing && tool === 'polygon' && currentPoints.length > 0 && (
                 <Line points={currentPoints} stroke="cyan" strokeWidth={2 / scale} dash={[6, 4]} />
               )}
+              {isDrawing && tool === 'freehand' && currentPoints.length > 1 && (
+                <Line points={currentPoints} stroke={brushColor} strokeWidth={brushSize / scale} opacity={brushOpacity} lineCap="round" lineJoin="round" tension={0.3} dash={[4, 4]} />
+              )}
             </Layer>
           </Stage>
         )}
@@ -367,16 +681,16 @@ const Annotate: React.FC = () => {
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-sm border border-slate-700 px-5 py-2.5 rounded-full flex items-center gap-5 text-slate-300 z-10 shadow-xl whitespace-nowrap">
           <div className="flex items-center gap-2">
             <Sun className="w-4 h-4 shrink-0" />
-            <input type="range" min="-1" max="1" step="0.05" value={brightness} onChange={e => setBrightness(parseFloat(e.target.value))} className="w-20 accent-blue-500" />
+            <input type="range" min="-1" max="1" step="0.05" value={brightness} onChange={e => { setBrightness(parseFloat(e.target.value)); setHasUnsavedDraft(true); }} className="w-20 accent-blue-500" />
           </div>
           <div className="flex items-center gap-2">
             <Contrast className="w-4 h-4 shrink-0" />
-            <input type="range" min="-100" max="100" step="5" value={contrast} onChange={e => setContrast(parseFloat(e.target.value))} className="w-20 accent-blue-500" />
+            <input type="range" min="-100" max="100" step="5" value={contrast} onChange={e => { setContrast(parseFloat(e.target.value)); setHasUnsavedDraft(true); }} className="w-20 accent-blue-500" />
           </div>
           <div className="w-px h-5 bg-slate-700 shrink-0" />
-          <button onClick={() => setScale(s => Math.min(s * 1.2, 10))}><ZoomIn className="w-4 h-4 hover:text-white transition-colors" /></button>
+          <button onClick={() => { setScale(s => Math.min(s * 1.2, 10)); setHasUnsavedDraft(true); }}><ZoomIn className="w-4 h-4 hover:text-white transition-colors" /></button>
           <span className="text-xs font-mono w-10 text-center">{Math.round(scale * 100)}%</span>
-          <button onClick={() => setScale(s => Math.max(s / 1.2, 0.05))}><ZoomOut className="w-4 h-4 hover:text-white transition-colors" /></button>
+          <button onClick={() => { setScale(s => Math.max(s / 1.2, 0.05)); setHasUnsavedDraft(true); }}><ZoomOut className="w-4 h-4 hover:text-white transition-colors" /></button>
         </div>
       </div>
 
@@ -400,17 +714,69 @@ const Annotate: React.FC = () => {
               <label className="block text-xs font-medium text-slate-400 mb-1.5">Label</label>
               <select
                 value={activeLabel}
-                onChange={e => setActiveLabel(e.target.value)}
+                onChange={e => {
+                  setActiveLabel(e.target.value);
+                  activeLabelRef.current = e.target.value;
+                  setHasUnsavedDraft(true);
+                }}
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all"
               >
                 {LABELS.map(l => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
             <div>
+              <label className="block text-xs font-medium text-slate-400 mb-1.5">BI-RADS</label>
+              <select
+                value={activeBiRads}
+                onChange={e => {
+                  setActiveBiRads(e.target.value);
+                  activeBiRadsRef.current = e.target.value;
+                  setHasUnsavedDraft(true);
+                }}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all"
+              >
+                <option value="0">0 – Incomplete</option>
+                <option value="1">1 – Negative</option>
+                <option value="2">2 – Benign</option>
+                <option value="3">3 – Probably Benign</option>
+                <option value="4">4 – Suspicious</option>
+                <option value="5">5 – Highly Suggestive of Malignancy</option>
+                <option value="6">6 – Known Biopsy-Proven Malignancy</option>
+              </select>
+            </div>
+            <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
+              <label className="block text-xs font-medium text-slate-400">Brush Style</label>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Size</span>
+                  <span>{brushSize}px</span>
+                </div>
+                <input type="range" min="1" max="24" step="1" value={brushSize} onChange={e => { setBrushSize(parseInt(e.target.value, 10)); setHasUnsavedDraft(true); }} className="w-full accent-blue-500" />
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Color</span>
+                  <span className="font-mono">{brushColor}</span>
+                </div>
+                <input type="color" value={brushColor} onChange={e => { setBrushColor(e.target.value); setHasUnsavedDraft(true); }} className="h-9 w-full cursor-pointer rounded border border-slate-700 bg-slate-900 p-1" />
+              </div>
+              <div>
+                <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Opacity</span>
+                  <span>{brushOpacity.toFixed(2)}</span>
+                </div>
+                <input type="range" min="0.1" max="1" step="0.05" value={brushOpacity} onChange={e => { setBrushOpacity(parseFloat(e.target.value)); setHasUnsavedDraft(true); }} className="w-full accent-blue-500" />
+              </div>
+            </div>
+            <div>
               <label className="block text-xs font-medium text-slate-400 mb-1.5">Remarks</label>
               <textarea
                 value={activeRemarks}
-                onChange={e => setActiveRemarks(e.target.value)}
+                onChange={e => {
+                  setActiveRemarks(e.target.value);
+                  activeRemarksRef.current = e.target.value;
+                  setHasUnsavedDraft(true);
+                }}
                 placeholder="Notes for this annotation…"
                 className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30 transition-all h-16 resize-none"
               />
@@ -444,7 +810,7 @@ const Annotate: React.FC = () => {
                     </button>
                   </div>
                 </div>
-                <div className="text-xs text-slate-500 mt-1 capitalize">{anno.type} · {Math.round(anno.tumorArea)} px²</div>
+                <div className="text-xs text-slate-500 mt-1 capitalize">{anno.type} · {anno.biRads ? `BI-RADS ${anno.biRads}` : 'No BI-RADS'} · {Math.round(anno.tumorArea)} px²</div>
                 {anno.remarks && (
                   <div className="text-xs text-slate-400 mt-1.5 italic leading-snug border-l-2 border-slate-700 pl-2">
                     {anno.remarks}

@@ -1,0 +1,32 @@
+{
+  "name": "mammogram-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Mammogram Database Platform",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "jsonwebtoken": "^9.1.0",
+    "bcryptjs": "^2.4.3",
+    "multer": "^1.4.5-lts.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "@types/jsonwebtoken": "^9.0.5",
+    "@types/bcryptjs": "^2.4.2",
+    "@types/uuid": "^9.0.7",
+    "typescript": "^5.3.3",
+    "tsx": "^4.7.0"
+  }
+}

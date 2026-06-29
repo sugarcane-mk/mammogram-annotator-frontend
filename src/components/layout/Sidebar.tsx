@@ -6,17 +6,23 @@ import {
   Users, 
   Image as ImageIcon, 
   Menu,
-  Stethoscope
+  Stethoscope,
+  Shield
 } from 'lucide-react';
 import { clsx } from 'clsx';
 
 const Sidebar: React.FC = () => {
   const { sidebarOpen, toggleSidebar } = useAppStore();
 
+  const authRole = useAppStore((state) => state.authRole);
+
+  const dashboardPath = authRole === 'admin' ? '/admin' : authRole === 'hospital' ? '/hospital' : '/dashboard';
+
   const navItems = [
-    { name: 'Dashboard', path: '/', icon: LayoutDashboard },
+    { name: 'Dashboard', path: dashboardPath, icon: LayoutDashboard },
     { name: 'Patients', path: '/patients', icon: Users },
     { name: 'Gallery', path: '/gallery', icon: ImageIcon },
+    ...(authRole === 'admin' ? [{ name: 'Users', path: '/users', icon: Shield }] : []),
   ];
 
   return (

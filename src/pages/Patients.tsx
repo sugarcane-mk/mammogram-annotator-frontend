@@ -3,6 +3,8 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db/database';
 import type { Patient, MammogramImage } from '../db/database';
 import { Plus, Search, UserPlus, Upload, X, Edit2, Check, ChevronDown, ChevronUp } from 'lucide-react';
+import { useAppStore } from '../store/store';
+import { canManageDataset, createAuditLog } from '../rbac/auth';
 
 // ─── View/Side decode from filename ───────────────────────────────────────────
 // Naming convention: <PatientID>_<Code>.png
@@ -138,16 +140,20 @@ const Patients: React.FC = () => {
   const [remarks, setRemarks] = useState('');
   const [uploadRows, setUploadRows] = useState<UploadImageRow[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const authRole = useAppStore((state) => state.authRole);
+  const organizationId = useAppStore((state) => state.organizationId);
+  const authUser = useAppStore((state) => state.authUser);
 
-  const patients = useLiveQuery(
-    () => db.patients
-      .filter(p =>
-        (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        p.patientId.toLowerCase().includes(searchTerm.toLowerCase())
-      )
-      .toArray(),
-    [searchTerm]
-  );
+  const patients = useLiveQuery(() => {
+    const base = authRole === 'admin'
+      ? db.patients.toCollection()
+      : db.patients.where('organizationId').equals(organizationId ?? '');
+
+    return base.filter(p =>
+      (p.name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      p.patientId.toLowerCase().includes(searchTerm.toLowerCase())
+    ).toArray();
+  }, [searchTerm, authRole, organizationId]);
 
   const handleFilePick = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -191,7 +197,11 @@ const Patients: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!patientId || !patientAge) return;
+    if (!patientId || !patientAge || !canManageDataset(authRole)) return;
+    if (authRole === 'general') {
+      alert('General users cannot upload protected datasets.');
+      return;
+    }
     setIsSubmitting(true);
 
     try {
@@ -204,6 +214,9 @@ const Patients: React.FC = () => {
           age: Number(patientAge),
           studyDate,
           remarks,
+          organizationId: organizationId || 'sample-hospital',
+          uploadedByUserId: authUser?.id || 'unknown',
+          visibility: authRole === 'hospital' ? 'protected' : 'protected',
         });
       }
 
@@ -221,9 +234,23 @@ const Patients: React.FC = () => {
           remarks: '',
           status: 'Not Reviewed',
           uploadTimestamp: Date.now(),
+          organizationId: organizationId || 'sample-hospital',
+          uploadedByUserId: authUser?.id || 'unknown',
+          visibility: authRole === 'hospital' ? 'protected' : 'protected',
         };
         await db.images.add(img);
       }
+
+      await createAuditLog({
+        actorUserId: authUser?.id || 'unknown',
+        actorRole: authRole || 'general',
+        organizationId: organizationId || 'sample-hospital',
+        timestamp: Date.now(),
+        action: 'upload',
+        targetType: 'patient',
+        targetId: patientId.toUpperCase(),
+        details: `Uploaded patient data and ${uploadRows.length} image(s)`,
+      });
 
       resetForm();
     } catch (error: any) {
@@ -244,7 +271,8 @@ const Patients: React.FC = () => {
         </div>
         <button
           onClick={() => setIsModalOpen(true)}
-          className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors shadow-lg shadow-blue-900/30 font-medium"
+          disabled={!canManageDataset(authRole) || authRole === 'general'}
+          className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg transition-colors shadow-lg shadow-blue-900/30 font-medium"
         >
           <UserPlus className="w-5 h-5" />
           <span>Add Patient</span>

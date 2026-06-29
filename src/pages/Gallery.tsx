@@ -4,6 +4,8 @@ import { db } from '../db/database';
 import type { MammogramImage } from '../db/database';
 import { Upload, Search, Filter, ArrowRight, X, Edit2, Check, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import { useAppStore } from '../store/store';
+import { canManageDataset, createAuditLog } from '../rbac/auth';
 
 // ─── Filename decode ───────────────────────────────────────────────────────────
 // Convention: <PatientID>_<Code>.png
@@ -188,14 +190,35 @@ const Gallery: React.FC = () => {
   const [editingImage, setEditingImage] = useState<MammogramImage | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const navigate = useNavigate();
+  const authRole = useAppStore((state) => state.authRole);
+  const organizationId = useAppStore((state) => state.organizationId);
+  const authUser = useAppStore((state) => state.authUser);
 
-  const images = useLiveQuery(() => db.images.orderBy('uploadTimestamp').reverse().toArray(), []);
-  const patients = useLiveQuery(() => db.patients.toArray(), []);
+  const images = useLiveQuery(async () => {
+    const result = authRole === 'admin'
+      ? await db.images.toArray()
+      : authRole === 'general'
+        ? await db.images.where('visibility').equals('sample').toArray()
+        : await db.images.where('organizationId').equals(organizationId ?? '').toArray();
+    return result.sort((a, b) => b.uploadTimestamp - a.uploadTimestamp);
+  }, [authRole, organizationId]);
+  const patients = useLiveQuery(async () => {
+    const result = authRole === 'general'
+      ? await db.patients.where('visibility').equals('sample').toArray()
+      : authRole === 'admin'
+        ? await db.patients.toArray()
+        : await db.patients.where('organizationId').equals(organizationId ?? '').toArray();
+    return result;
+  }, [authRole, organizationId]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
 
+    if (!canManageDataset(authRole) || authRole === 'general') {
+      alert('General users cannot upload protected datasets.');
+      return;
+    }
     setIsUploading(true);
     const results: UploadResult[] = [];
 
@@ -223,6 +246,9 @@ const Gallery: React.FC = () => {
               name: undefined,
               studyDate: new Date().toISOString().split('T')[0],
               remarks: 'Auto-created from bulk upload',
+              organizationId: organizationId || 'sample-hospital',
+              uploadedByUserId: authUser?.id || 'unknown',
+              visibility: 'protected',
             });
           }
 
@@ -237,6 +263,20 @@ const Gallery: React.FC = () => {
             remarks: '',
             status: 'Not Reviewed',
             uploadTimestamp: Date.now(),
+            organizationId: organizationId || 'sample-hospital',
+            uploadedByUserId: authUser?.id || 'unknown',
+            visibility: 'protected',
+          });
+
+          await createAuditLog({
+            actorUserId: authUser?.id || 'unknown',
+            actorRole: authRole || 'general',
+            organizationId: organizationId || 'sample-hospital',
+            timestamp: Date.now(),
+            action: 'upload',
+            targetType: 'image',
+            targetId: newImageId,
+            details: `Uploaded ${filename}`,
           });
 
           results.push({ filename, patientId, view: viewLabel, side: sideLabel, success: true });
@@ -251,7 +291,7 @@ const Gallery: React.FC = () => {
     }
   };
 
-  const filteredImages = images?.filter(img => {
+  const filteredImages = (images ?? []).filter(img => {
     const matchesSearch =
       img.patientId.toLowerCase().includes(searchTerm.toLowerCase()) ||
       img.originalFilename.toLowerCase().includes(searchTerm.toLowerCase());
@@ -282,7 +322,7 @@ const Gallery: React.FC = () => {
           />
           <button
             onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isUploading || !canManageDataset(authRole) || authRole === 'general'}
             className="flex items-center space-x-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg transition-colors font-medium shadow-lg shadow-blue-900/30"
           >
             <Upload className="w-5 h-5" />
@@ -321,7 +361,7 @@ const Gallery: React.FC = () => {
 
         {/* Grid */}
         <div className="flex-1 p-6 overflow-auto">
-          {!filteredImages || filteredImages.length === 0 ? (
+          {filteredImages.length === 0 ? (
             <div className="h-full min-h-[300px] flex flex-col items-center justify-center text-slate-500 space-y-3">
               <Upload className="w-12 h-12 opacity-20" />
               <p className="text-sm">No images found.</p>

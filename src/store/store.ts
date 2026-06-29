@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { AppUser, UserRole } from '../db/database';
 
 export interface Toast {
   id: string;
@@ -16,6 +17,12 @@ interface AppState {
   toasts: Toast[];
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   removeToast: (id: string) => void;
+
+  authUser: AppUser | null;
+  authRole: UserRole | null;
+  organizationId: string | null;
+  setAuthUser: (user: AppUser | null) => void;
+  clearAuthUser: () => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -35,4 +42,10 @@ export const useAppStore = create<AppState>((set) => ({
     }, 3000);
   },
   removeToast: (id) => set((state) => ({ toasts: state.toasts.filter(t => t.id !== id) })),
+
+  authUser: null,
+  authRole: null,
+  organizationId: null,
+  setAuthUser: (user) => set({ authUser: user, authRole: user?.role ?? null, organizationId: user?.organizationId ?? null }),
+  clearAuthUser: () => set({ authUser: null, authRole: null, organizationId: null }),
 }));

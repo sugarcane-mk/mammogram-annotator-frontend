@@ -5,7 +5,7 @@ import Header from './Header';
 import { useAppStore } from '../../store/store';
 import { clsx } from 'clsx';
 
-const Layout: React.FC = () => {
+const Layout: React.FC<{ children?: React.ReactNode }> = ({ children }) => {
   const sidebarOpen = useAppStore((state) => state.sidebarOpen);
 
   return (
@@ -19,7 +19,7 @@ const Layout: React.FC = () => {
       >
         <Header />
         <main className="flex-1 overflow-auto p-6">
-          <Outlet />
+          {children ?? <Outlet />}
         </main>
       </div>
     </div>
